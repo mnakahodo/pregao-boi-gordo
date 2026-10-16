@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#232D5F">
+<title>Pregão do Boi Gordo</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="phone">
+  <div class="top">
+    <div style="width:10px;height:10px;background:#00AACA"></div>
+    <h1>Pregão do Boi Gordo</h1>
+    <div class="pts" id="pts"></div>
+  </div>
+  <div id="app"></div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/static/common.js"></script>
+<script>
+const socket = io();
+const app = $("#app");
+const urlCode = (location.pathname.match(/\/j\/([A-Za-z]{4})/) || [])[1] || new URLSearchParams(location.search).get("c") || "";
+let code = urlCode.toUpperCase(), D = null, err = "", joined = false;
+const key = () => "pregao-p-" + code;
+
+function tryResume() {
+  const tok = code && lsGet(key());
+  if (!tok) return renderJoin();
+  socket.emit("player:join", { code, token: tok }, (r) => { if (r.ok) joined = true; else renderJoin(); });
+}
+socket.on("connect", tryResume);
+socket.on("player:state", (d) => { D = d; render(); });
+
+function renderJoin() {
+  $("#pts").innerHTML = "";
+  app.innerHTML = `<div class="card">
+    <div class="kicker">Entrar no jogo</div>
+    <h2>Bem-vindo ao pregão!</h2>
+    <p class="muted">Você vai negociar contratos futuros de boi gordo. Digite seu nome (ou o nome do grupo).</p>
+    <label class="small muted">Código da sala</label>
+    <input id="c" maxlength="4" autocapitalize="characters" value="${esc(code)}" placeholder="ABCD">
+    <label class="small muted">Seu nome ou grupo</label>
+    <input id="n" maxlength="24" placeholder="Ex.: Ana ou Grupo 3" autocomplete="off">
+    <div class="err">${esc(err)}</div>
+    <button class="btn" id="go">Entrar</button></div>`;
+  $("#go").onclick = () => {
+    code = $("#c").value.trim().toUpperCase();
+    socket.emit("player:join", { code, name: $("#n").value }, (r) => {
+      if (!r.ok) { err = r.error; return renderJoin(); }
+      lsSet(key(), r.token); joined = true; err = "";
+    });
+  };
+}
+
+const ROLE_TXT = {
+  pecuarista: "Você engorda 660 @ de boi e vai VENDÊ-LAS no vencimento. Seu medo: a arroba CAIR. Proteção: VENDER contratos futuros.",
+  frigorifico: "Você precisa COMPRAR 660 @ de boi no vencimento para cumprir contratos. Seu medo: a arroba SUBIR. Proteção: COMPRAR contratos futuros.",
+  especulador: "Você não tem boi. Compra ou vende contratos apostando na direção do preço — e dá liquidez para quem faz hedge.",
+};
+
+function statusCard(me, pub) {
+  const c = pub.cfg;
+  return `<div class="card">
+    <div class="row"><span class="tag ${me.role}">${ROLE_NAME[me.role]}</span><span class="grow"></span><span class="small muted">Futuro: <b style="color:#232D5F">R$ ${pub.price}/@</b></span></div>
+    <h2 style="margin-top:10px">${posText(me.role, me.pos)}</h2>
+    ${me.liquidated ? `<div class="small neg" style="margin-bottom:6px"><b>Posição encerrada${me.forced ? " pela corretora (chamada de margem não atendida)" : " após chamada de margem"}.</b> Seu boi físico ficou sem proteção.</div>` : ""}
+    <div class="kv">
+      <span>Saldo da conta margem</span><b>${brl(me.margin)}</b>
+      <span>Ajuste da última rodada</span><b class="${cls(me.lastAjuste)}">${sbrl(me.lastAjuste)}</b>
+      <span>Ajustes acumulados</span><b class="${cls(me.ajusteTotal)}">${sbrl(me.ajusteTotal)}</b>
+      ${me.aportes ? `<span>Aportes de margem</span><b>${brl(me.aportes)}</b>` : ""}
+      ${me.pos ? `<span>Margem mínima (manutenção)</span><b>${brl(c.maintMargin * Math.abs(me.pos))}</b>` : ""}
+    </div></div>`;
+}
+function history(me) {
+  const L = me.log.filter((l) => !l.call);
+  if (!L.length) return "";
+  return `<div class="card"><div class="kicker">Seu histórico (R$)</div>
+    <table class="hist"><tr><th>Rod.</th><th class="num">Preço</th><th class="num">Ajuste</th><th class="num">Saldo</th><th class="num">Palp.</th></tr>
+    ${L.map((l) => `<tr><td>${l.round}</td><td class="num">${l.price} <span class="${cls(l.move)} small">${num(l.move)}</span></td>
+    <td class="num ${cls(l.ajuste)}">${num(l.ajuste)}</td><td class="num">${num(l.saldo).replace("+", "")}</td><td class="num">${l.vote ? (l.hit ? "✓" : "✗") : "—"}</td></tr>`).join("")}</table></div>`;
+}
+function render() {
+  if (!D) return;
+  const { pub, me } = D;
+  $("#pts").innerHTML = `${esc(me.name)}<b>${me.points} pts</b>`;
+  let h = "";
+  if (pub.phase === "lobby") {
+    h = `<div class="card"><span class="tag ${me.role}">${ROLE_NAME[me.role]}</span><h2 style="margin-top:10px">Você está dentro!</h2>
+      <p>${ROLE_TXT[me.role]}</p><p class="muted small">O professor pode trocar seu papel antes do início. Aguarde o pregão começar…</p></div>`;
+  } else if (pub.phase === "hedge") {
+    if (me.role === "especulador") {
+      h = `<div class="card"><span class="tag especulador">Especulador</span><h2 style="margin-top:10px">Prepare sua estratégia</h2>
+        <p>${ROLE_TXT.especulador}</p><p>Capital inicial: <b>${brl(pub.cfg.specCapital)}</b>. Cada contrato exige <b>${brl(pub.cfg.initialMargin)}</b> de margem (máx. ${pub.cfg.specMax}).</p>
+        <p class="muted small">A cada rodada você lê a notícia e decide: comprado, vendido ou fora.</p></div>`;
+    } else {
+      const verb = me.role === "pecuarista" ? "VENDER" : "COMPRAR";
+      const k = Math.abs(me.pos);
+      h = `<div class="card"><span class="tag ${me.role}">${ROLE_NAME[me.role]}</span><h2 style="margin-top:10px">Quanto proteger?</h2>
+        <p>${ROLE_TXT[me.role]}</p>
+        <p>Futuro hoje: <b>R$ ${pub.price}/@</b>. Quantos contratos você quer <b>${verb}</b>?</p>
+        <div class="opts">${[0, 1, 2].map((n) => `<button data-hedge="${n}" class="${me.hedgeChosen && k === n ? "sel" : ""}">${n} contrato${n === 1 ? "" : "s"}<br><span class="small">${n === 0 ? "sem hedge" : n === 1 ? "50% · 330 @" : "100% · 660 @"}</span></button>`).join("")}</div>
+        <p class="small muted" style="margin-top:10px">Margem exigida: ${brl(pub.cfg.initialMargin)} por contrato.${me.hedgeChosen ? " <b>Decisão registrada — pode mudar até o pregão abrir.</b>" : ""}</p></div>`;
+    }
+  } else if (pub.phase === "news") {
+    const spec = me.role === "especulador";
+    const cur = me.pendingPos ?? me.pos;
+    h = `<div class="card"><div class="kicker">Rodada ${pub.round} de ${pub.totalRounds}</div><h2>${esc(pub.card.titulo)}</h2><p>${esc(pub.card.texto)}</p>
+      <div class="kicker" style="margin-top:6px">Seu palpite: o preço do boi vai…</div>
+      <div class="vote"><button class="btn up ${me.vote === "sobe" ? "sel" : ""}" data-vote="sobe">▲ SUBIR</button><button class="btn down ${me.vote === "cai" ? "sel" : ""}" data-vote="cai">▼ CAIR</button></div>
+      ${me.vote ? '<p class="small muted">Palpite registrado. Aguarde a revelação do preço.</p>' : ""}</div>
+      ${spec ? `<div class="card"><div class="kicker">Sua posição para esta rodada</div>
+        <div class="opts seven">${[-3, -2, -1, 0, 1, 2, 3].map((n) => `<button data-pos="${n}" class="${cur === n ? "sel" : ""}">${n > 0 ? "C" + n : n < 0 ? "V" + -n : "0"}</button>`).join("")}</div>
+        <p class="small muted" style="margin-top:8px">V = vendido, C = comprado (contratos). Agora: <b>${posText("especulador", cur)}</b>. Aumentar a posição exige ${brl(pub.cfg.initialMargin)} de margem por contrato.</p></div>` : ""}
+      ${statusCard(me, pub)}`;
+  } else if (pub.phase === "result") {
+    const call = me.marginCall;
+    const lr = me.log.find((l) => !l.call && l.round === pub.round);
+    h = `${call ? `<div class="card callbox"><h2>Chamada de margem!</h2>
+        <p>Seu saldo caiu abaixo da margem mínima. Deposite <b>${brl(call.need)}</b> para manter a posição ou ela será encerrada.</p>
+        <div class="vote"><button class="btn" data-margin="depositar">Depositar ${brl(call.need)}</button><button class="btn ghost" data-margin="zerar">Zerar posição</button></div>
+        <p class="small muted">${me.role === "especulador" ? "Zerar realiza o prejuízo." : "Zerar remove a proteção do seu boi físico."}</p></div>` : ""}
+      <div class="card"><div class="kicker">Rodada ${pub.round} · preço revelado</div>
+        <div class="row" style="align-items:flex-end"><div class="bigprice" style="font-size:48px">R$ ${pub.price}</div><div class="move ${cls(pub.lastMove)}" style="font-size:28px">${pub.lastMove > 0 ? "▲ +" : pub.lastMove < 0 ? "▼ " : ""}${pub.lastMove}</div></div>
+        <p class="${lr && lr.hit ? "pos" : "neg"}" style="font-weight:700">${lr && lr.vote ? (lr.hit ? "Você acertou a direção! +100 pts" : "Palpite errado desta vez.") : "Você não deu palpite."}</p>
+        <p class="small"><b>Por quê?</b> ${esc(pub.card.porque)}</p></div>
+      ${statusCard(me, pub)}${history(me)}`;
+  } else if (pub.phase === "end") {
+    const r = D.results.rows.find((x) => x.id === me.id) || {};
+    let res = "";
+    if (me.role === "pecuarista") res = `<p>Você vendeu 660 @ a <b>R$ ${pub.price}</b> no físico (${brl(r.fisico)}) e teve ${sbrl(r.ajusteTotal)} no futuro.</p><div class="bigprice" style="font-size:44px">R$ ${r.efetivo.toFixed(2).replace(".", ",")}/@</div><p class="muted small">Preço efetivo de venda. Quem travou 100% no início obteve R$ ${pub.cfg.startPrice},00/@.</p>`;
+    else if (me.role === "frigorifico") res = `<p>Você comprou 660 @ a <b>R$ ${pub.price}</b> no físico (${brl(r.fisico)}) e teve ${sbrl(r.ajusteTotal)} no futuro.</p><div class="bigprice" style="font-size:44px">R$ ${r.efetivo.toFixed(2).replace(".", ",")}/@</div><p class="muted small">Custo efetivo de compra. Quem travou 100% no início pagou R$ ${pub.cfg.startPrice},00/@.</p>`;
+    else res = `<p>Resultado no mercado futuro:</p><div class="bigprice ${cls(r.total)}" style="font-size:44px">${sbrl(r.total)}</div><p class="muted small">Sobre o capital inicial de ${brl(pub.cfg.specCapital)}${r.aportes ? ` e aportes de ${brl(r.aportes)}` : ""}.</p>`;
+    h = `<div class="card"><div class="kicker">Vencimento · R$ ${pub.price}/@</div><h2>Fim do pregão</h2>${res}</div>
+      <div class="card"><div class="kicker">Ranking de analistas</div><h2>${r.rank}º lugar</h2><p>${r.correct} acerto${r.correct === 1 ? "" : "s"} de direção · ${r.points} pts</p></div>${history(me)}`;
+  }
+  app.innerHTML = h;
+  app.querySelectorAll("[data-hedge]").forEach((b) => (b.onclick = () => socket.emit("player:hedge", +b.dataset.hedge)));
+  app.querySelectorAll("[data-vote]").forEach((b) => (b.onclick = () => socket.emit("player:vote", b.dataset.vote)));
+  app.querySelectorAll("[data-pos]").forEach((b) => (b.onclick = () => socket.emit("player:position", +b.dataset.pos)));
+  app.querySelectorAll("[data-margin]").forEach((b) => (b.onclick = () => socket.emit("player:margin", b.dataset.margin)));
+}
+if (!code) renderJoin();
+</script>
+</body>
+</html>

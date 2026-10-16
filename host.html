@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pregão do Boi Gordo — Professor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="host">
+<header>
+  <div class="sq"></div>
+  <h1>Pregão do Boi Gordo</h1>
+  <div class="meta">
+    <span id="hRound"></span>
+    <span>Futuro: <b id="hPrice">R$ 320</b></span>
+    <span>Código: <b id="hCode">····</b></span>
+  </div>
+</header>
+<main id="app"><div class="card">Conectando…</div></main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/static/common.js"></script>
+<script>
+const socket = io();
+let S = null, joinUrl = "";
+const app = $("#app");
+const act = (type, extra = {}) => socket.emit("host:action", { type, ...extra });
+
+async function computeJoinUrl(code) {
+  let origin = location.origin;
+  if (/^(localhost|127\.)/.test(location.hostname)) {
+    try { const i = await (await fetch("/info")).json(); if (i.ips[0]) origin = `http://${i.ips[0]}:${i.port}`; } catch {}
+  }
+  joinUrl = `${origin}/j/${code}`;
+}
+function boot() {
+  const saved = JSON.parse(lsGet("pregao-host") || "null");
+  const fresh = new URLSearchParams(location.search).has("novo");
+  if (saved && !fresh) {
+    socket.emit("host:resume", saved, (r) => { if (r && r.ok) computeJoinUrl(saved.code).then(render); else create(); });
+  } else create();
+}
+function create() {
+  socket.emit("host:create", {}, async (r) => { lsSet("pregao-host", JSON.stringify(r)); await computeJoinUrl(r.code); render(); });
+}
+socket.on("connect", boot);
+socket.on("host:state", (s) => { S = s; render(); });
+
+function render() {
+  if (!S) return;
+  $("#hCode").textContent = S.code;
+  $("#hPrice").textContent = "R$ " + S.price;
+  $("#hRound").textContent = S.round ? `Rodada ${S.round} de ${S.totalRounds}` : "";
+  const v = { lobby, hedge, news, result, end }[S.phase];
+  app.innerHTML = v();
+  bind();
+}
+
+function roleCol(role, desc) {
+  const ps = S.list.filter((p) => p.role === role);
+  return `<div><h3><span>${ROLE_NAME[role]}s</span><span class="muted">${ps.length}</span></h3>
+    <div class="small muted" style="margin-bottom:8px">${desc}</div>
+    <div class="chips">${ps.map((p) => `<span class="chip ${p.connected ? "" : "off"}">${esc(p.name)}
+      ${S.phase === "lobby" ? `<button data-role="${p.id}" title="Trocar papel">↻</button><button data-kick="${p.id}" title="Remover">×</button>` : ""}</span>`).join("") || '<span class="muted small">ninguém ainda</span>'}</div></div>`;
+}
+function lobby() {
+  return `<div class="lobby">
+    <div class="card qrbox">
+      <div class="kicker">Aponte a câmera do celular</div>
+      <img src="/qr.svg?u=${encodeURIComponent(joinUrl)}" alt="QR Code para entrar no jogo">
+      <div class="code">${S.code}</div>
+      <div class="url">${esc(joinUrl)}</div>
+    </div>
+    <div class="card">
+      <div class="kicker">Sala de espera</div>
+      <h2 style="font-size:40px;margin:6px 0">${S.players} participante${S.players === 1 ? "" : "s"} conectado${S.players === 1 ? "" : "s"}</h2>
+      <div class="muted">Cada celular pode ser um aluno ou um grupo. Os papéis são distribuídos automaticamente (≈ 40% pecuaristas, 40% frigoríficos, 20% especuladores). Clique em ↻ para trocar o papel de alguém.</div>
+      <div class="roles">
+        ${roleCol("pecuarista", "Vai vender 660 @ de boi no fim do jogo. Teme a QUEDA da arroba.")}
+        ${roleCol("frigorifico", "Vai comprar 660 @ de boi no fim do jogo. Teme a ALTA da arroba.")}
+        ${roleCol("especulador", "Não tem boi. Assume risco para lucrar com a variação.")}
+      </div>
+      <div class="toolbar">
+        <span class="muted">Rodadas:</span>
+        <span class="seg">${[6, 8, 10, 12].map((n) => `<button data-rounds="${n}" class="${S.totalRounds === n ? "on" : ""}">${n}</button>`).join("")}</span>
+        <span class="grow"></span>
+        <button class="btn cyan" data-act="start" ${S.players ? "" : "disabled"}>Começar o jogo →</button>
+      </div>
+    </div></div>`;
+}
+function hedge() {
+  const c = S.cfg;
+  return `<div class="stage">
+    <div class="card news">
+      <div class="kicker">Antes do pregão abrir</div>
+      <h2>Hora de decidir o hedge</h2>
+      <p>O contrato futuro de boi gordo para o vencimento está a <b>R$ ${S.price}/@</b>. Cada contrato tem <b>${c.contractSize} arrobas</b> e exige <b>${brl(c.initialMargin)}</b> de margem de garantia.</p>
+      <p><b>Pecuaristas</b> escolhem quantos contratos <b>vender</b> (0, 1 ou 2) para proteger as 660 @ que vão vender.<br>
+      <b>Frigoríficos</b> escolhem quantos contratos <b>comprar</b> (0, 1 ou 2) para proteger as 660 @ que vão comprar.<br>
+      <b>Especuladores</b> começam com ${brl(c.specCapital)} e escolhem a posição a cada rodada.</p>
+      <div class="why"><b>Regra da margem:</b> se o saldo ficar abaixo de ${brl(c.maintMargin)} por contrato, há <b>chamada de margem</b>. O jogador deve depositar até ${brl(c.initialMargin)} por contrato ou terá a posição encerrada.</div>
+    </div>
+    <div class="card">
+      <div class="kicker">Decisões recebidas</div>
+      <div class="bigprice">${S.hedgeDone}/${S.players}</div>
+      <div class="progress"><div style="width:${S.players ? (100 * S.hedgeDone) / S.players : 0}%"></div></div>
+      <p class="muted">Quem não decidir até a abertura fica <b>sem hedge</b>.</p>
+      <button class="btn cyan" data-act="open" style="width:100%">Abrir o pregão: rodada 1 →</button>
+    </div></div>`;
+}
+function priceBox(showMove) {
+  return `<div class="row" style="align-items:flex-end;gap:24px">
+      <div><div class="kicker">Futuro B3 (R$/@)</div><div class="bigprice">${S.price}</div></div>
+      ${showMove ? `<div class="move ${cls(S.lastMove)}">${S.lastMove > 0 ? "▲ +" : S.lastMove < 0 ? "▼ " : ""}${S.lastMove}</div>` : ""}
+      <div class="grow"></div>
+      <div style="text-align:right"><div class="kicker">À vista</div><div class="move" style="color:#007F99">${S.spot}</div></div>
+    </div>
+    <div class="chart" style="margin-top:14px">${chartSVG(S.history, { total: S.totalRounds })}</div>`;
+}
+function news() {
+  const last = S.round === S.totalRounds;
+  return `<div class="stage">
+    <div class="card news">
+      <div class="kicker">Rodada ${S.round}${last ? " · semana do vencimento" : ""} · notícia do mercado</div>
+      <h2>${esc(S.card.titulo)}</h2>
+      <p>${esc(S.card.texto)}</p>
+      <div class="insp">${esc(S.card.inspiracao)}</div>
+      <div class="why"><b>Nos celulares:</b> o preço do boi vai SUBIR ou CAIR? Especuladores também escolhem a posição.</div>
+    </div>
+    <div class="card">
+      ${priceBox(false)}
+      <div class="stats">
+        <div class="stat">Palpites<b>${S.voted}/${S.players}</b></div>
+        <div class="stat">Contrato<b>${S.cfg.contractSize} @</b></div>
+        <div class="stat">R$ 1/@ vale<b>${brl(S.cfg.contractSize)}</b></div>
+      </div>
+      <div class="progress"><div style="width:${S.players ? (100 * S.voted) / S.players : 0}%"></div></div>
+      <button class="btn cyan" data-act="reveal" style="width:100%;margin-top:16px">Revelar o preço de ajuste →</button>
+    </div></div>`;
+}
+function result() {
+  const calls = S.list.filter((p) => p.log.some((l) => l.round === S.round && l.call) || p.marginCall);
+  const callRows = calls.map((p) => {
+    const done = p.log.find((l) => l.round === S.round && l.call);
+    return `<div class="alert ${done ? (done.call === "depositar" ? "ok" : "bad") : ""}"><span>${esc(p.name)} · ${ROLE_NAME[p.role]}</span>
+      <span>${p.marginCall ? "chamada de margem: " + brl(p.marginCall.need) : done.call === "depositar" ? "depositou" : "posição zerada"}</span></div>`;
+  }).join("");
+  const last = S.round >= S.totalRounds;
+  const hit = S.list.filter((p) => p.log.some((l) => l.round === S.round && l.hit)).length;
+  return `<div class="stage">
+    <div class="card news">
+      <div class="kicker">Rodada ${S.round} · resultado</div>
+      <h2>${esc(S.card.titulo)}</h2>
+      <div class="why"><b>Por que o preço ${S.lastMove >= 0 ? "subiu" : "caiu"}?</b> ${esc(S.card.porque)}</div>
+      <div class="stats">
+        <div class="stat">Ajuste por contrato comprado<b class="${cls(S.lastMove)}">${sbrl(S.lastMove * S.cfg.contractSize)}</b><span class="small muted">${S.lastMove >= 0 ? "comprados recebem, vendidos pagam" : "vendidos recebem, comprados pagam"}</span></div>
+        <div class="stat">Acertaram a direção<b>${hit}/${S.players}</b></div>
+        <div class="stat">Chamadas de margem<b>${calls.length}</b></div>
+      </div>
+      ${calls.length ? `<div class="alerts">${callRows}</div><p class="small muted">Quem não responder até a próxima rodada terá a posição encerrada pela corretora.</p>` : ""}
+    </div>
+    <div class="card">
+      ${priceBox(true)}
+      <button class="btn cyan" data-act="next" style="width:100%;margin-top:16px">${last ? "Encerrar no vencimento e ver resultados →" : `Próxima rodada (${S.round + 1}) →`}</button>
+    </div></div>`;
+}
+function end() {
+  const R = S.results, rows = R.rows;
+  const by = (r) => rows.filter((x) => x.role === r);
+  const hedgeT = (r, label) => `<table><tr><th>${label}</th><th class="num">Contratos</th><th class="num">Físico</th><th class="num">Futuro</th><th class="num">Preço efetivo</th></tr>
+    ${by(r).map((x) => `<tr><td>${esc(x.name)}${x.liquidated ? ' <span class="small neg">(zerado)</span>' : ""}</td><td class="num">${x.hedge ? Math.abs(x.hedge) : 0}</td><td class="num">${brl(x.fisico)}</td>
+    <td class="num ${cls(x.ajusteTotal)}">${sbrl(x.ajusteTotal)}</td><td class="num"><b>R$ ${x.efetivo.toFixed(2).replace(".", ",")}</b></td></tr>`).join("") || '<tr><td colspan="5" class="muted">—</td></tr>'}</table>`;
+  const peq = by("pecuarista"), fr = by("frigorifico"), sp = by("especulador");
+  const full = peq.filter((x) => Math.abs(x.hedge) === 2 && !x.liquidated);
+  const none = peq.filter((x) => !x.hedge);
+  const calls = rows.reduce((a, x) => a + x.marginCalls, 0), forced = rows.filter((x) => x.forced).length;
+  const sum = rows.reduce((a, x) => a + x.ajusteTotal, 0);
+  const lessons = [
+    `O boi começou a <b>R$ ${R.startPrice}/@</b> e venceu a <b>R$ ${R.finalPrice}/@</b>. No vencimento, futuro e à vista convergiram.`,
+    full.length ? `Pecuaristas com hedge de 100% (2 contratos) terminaram com <b>R$ ${full[0].efetivo.toFixed(2).replace(".", ",")}/@</b>, travando o preço inicial, independentemente do caminho do mercado.` : "Nenhum pecuarista manteve hedge de 100% até o fim: o preço efetivo de todos dependeu do mercado.",
+    none.length ? `Quem ficou sem hedge vendeu a <b>R$ ${R.finalPrice}/@</b>: ${R.finalPrice >= R.startPrice ? "desta vez o mercado ajudou, mas foi sorte — o risco era o mesmo." : "o mercado caiu e o prejuízo foi integral."}` : "",
+    ...rows.filter((x) => x.liquidated && x.role !== "especulador").slice(0, 2).map((x) => `<b>${esc(x.name)}</b> (${ROLE_NAME[x.role].toLowerCase()}) teve o hedge encerrado após uma chamada de margem e terminou com <b>R$ ${x.efetivo.toFixed(2).replace(".", ",")}/@</b> — ficou exposto justamente quando o mercado virou.`),
+    `Houve <b>${calls}</b> chamada${calls === 1 ? "" : "s"} de margem${forced ? ` e <b>${forced}</b> posição${forced === 1 ? "" : "ões"} encerrada${forced === 1 ? "" : "s"} por falta de resposta` : ""}. Hedge elimina o risco de preço, mas exige CAIXA no meio do caminho.`,
+    `Para cada contrato comprado existe um vendido: no mercado real a soma de todos os ajustes é <b>zero</b> — o futuro transfere risco, não cria dinheiro. Na turma, a soma foi ${brl(sum)}; a diferença ficou com os demais participantes do mercado, fora da sala.`,
+  ].filter(Boolean);
+  return `<div class="endgrid">
+    <div class="card"><div class="kicker">Vencimento</div><h2 style="font-size:40px;margin:6px 0 10px">O que aprendemos</h2>
+      <ul class="lessons">${lessons.map((l) => `<li>${l}</li>`).join("")}</ul>
+      <div class="chart" style="margin-top:12px">${chartSVG(S.history, { total: S.totalRounds })}</div></div>
+    <div class="card"><div class="kicker">Ranking de analistas (palpites certos)</div>
+      <table><tr><th>#</th><th>Participante</th><th>Papel</th><th class="num">Acertos</th><th class="num">Pontos</th></tr>
+      ${rows.slice(0, 10).map((x) => `<tr><td>${x.rank}</td><td>${esc(x.name)}</td><td><span class="tag ${x.role}">${ROLE_NAME[x.role]}</span></td><td class="num">${x.correct}</td><td class="num"><b>${x.points}</b></td></tr>`).join("")}</table></div>
+    <div class="card"><div class="kicker">Pecuaristas · receita por arroba</div>${hedgeT("pecuarista", "Pecuarista")}</div>
+    <div class="card"><div class="kicker">Frigoríficos · custo por arroba</div>${hedgeT("frigorifico", "Frigorífico")}</div>
+    <div class="card"><div class="kicker">Especuladores · resultado</div>
+      <table><tr><th>Especulador</th><th class="num">Resultado</th><th class="num">Aportes</th><th class="num">Chamadas</th></tr>
+      ${sp.sort((a, b) => b.total - a.total).map((x) => `<tr><td>${esc(x.name)}</td><td class="num ${cls(x.total)}"><b>${sbrl(x.total)}</b></td><td class="num">${brl(x.aportes)}</td><td class="num">${x.marginCalls}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">—</td></tr>'}</table></div>
+    <div class="card"><div class="kicker">Debate</div>
+      <ul class="lessons"><li>Um pecuarista que pagou ajustes no futuro “perdeu dinheiro”?</li><li>Por que quem não respondeu à chamada de margem ficou exposto ao risco?</li><li>Os especuladores ajudaram ou atrapalharam os hedgers?</li></ul>
+      <div class="toolbar"><button class="btn ghost" data-act="restart">Jogar de novo com a mesma turma</button><a class="btn ghost" href="/professor?novo=1" style="text-decoration:none">Nova sala</a></div></div>
+  </div>`;
+}
+function bind() {
+  app.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => {
+    if (b.dataset.act === "restart" && !confirm("Zerar o jogo e voltar para a sala de espera?")) return;
+    act(b.dataset.act);
+  }));
+  app.querySelectorAll("[data-rounds]").forEach((b) => (b.onclick = () => act("rounds", { value: +b.dataset.rounds })));
+  app.querySelectorAll("[data-role]").forEach((b) => (b.onclick = () => act("role", { id: b.dataset.role })));
+  app.querySelectorAll("[data-kick]").forEach((b) => (b.onclick = () => act("kick", { id: b.dataset.kick })));
+}
+</script>
+</body>
+</html>
