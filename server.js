@@ -27,13 +27,20 @@ const ROLES = ["pecuarista", "frigorifico", "especulador"];
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: false } });
-const PUB = path.join(__dirname, "public");
+// Os arquivos das telas ficam na pasta "public". Se ela não existir (por exemplo, quando
+// os arquivos foram enviados ao GitHub todos soltos na raiz), o jogo procura na própria raiz.
+const fs = require("fs");
+const PUB = fs.existsSync(path.join(__dirname, "public", "host.html")) ? path.join(__dirname, "public") : __dirname;
+const PAGES = ["index.html", "host.html", "play.html", "style.css", "common.js"];
+const missing = PAGES.filter((f) => !fs.existsSync(path.join(PUB, f)));
+if (missing.length) console.error("ATENÇÃO: arquivos não encontrados:", missing.join(", "), "— procurados em", PUB);
+const page = (f) => (req, res) => res.sendFile(path.join(PUB, f), (err) => err && res.status(404).send(`Arquivo ${f} não encontrado no servidor. Confira se ele foi enviado ao GitHub.`));
 
-app.get("/", (req, res) => res.sendFile(path.join(PUB, "index.html")));
-app.get("/professor", (req, res) => res.sendFile(path.join(PUB, "host.html")));
-app.get("/j/:code", (req, res) => res.sendFile(path.join(PUB, "play.html")));
-app.get("/jogar", (req, res) => res.sendFile(path.join(PUB, "play.html")));
-app.use("/static", express.static(PUB, { maxAge: "1h" }));
+app.get("/", page("index.html"));
+app.get("/professor", page("host.html"));
+app.get("/j/:code", page("play.html"));
+app.get("/jogar", page("play.html"));
+app.get("/static/:file", (req, res, next) => (["style.css", "common.js"].includes(req.params.file) ? page(req.params.file)(req, res) : next()));
 app.get("/qr.svg", async (req, res) => {
   const url = String(req.query.u || "").slice(0, 300);
   if (!/^https?:\/\//.test(url)) return res.status(400).send("url inválida");
